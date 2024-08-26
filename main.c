@@ -4,7 +4,7 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <semaphore.h>
-
+#include <math.h>
 
 #define TRACK_CHAR '-'
 #define TRAIN_CHAR '*'
@@ -12,7 +12,6 @@
 #define NUM_TRAINS 4
 #define NUM_SHARED_TRACKS 4
 #define NUM_TRACKS 4
-#define MAX_TRAINS_IN_INTERSECTION 2
 
 // Track dimensions
 const int track_width = 10;
@@ -23,20 +22,20 @@ bool paused = false;
 // Structure to represent train position
 typedef struct {
     int track_id;
-    int position;
+    float position;
 } TrainPosition;
 
 // Global variables for train positions and velocities
 TrainPosition train_pos[NUM_TRAINS] = {
-    {0, (int) 0.75 * track_len},
-    {1, 0},
-    {2, track_len / 2},
+    {0, 0.75f * track_len},
+    {1, 0.0f},
+    {2, track_len / 2.0f},
     {3, track_width}
 };
-int train_vel[NUM_TRAINS] = {1, 1, 1, 1};
+float train_vel[NUM_TRAINS] = {1.0f, 1.0f, 1.0f, 1.0f};
 int active_train = 0;  // Index of the currently selected train
                        
-int original_train_vel[NUM_TRAINS] = {1, 1, 1, 1};
+float original_train_vel[NUM_TRAINS] = {1.0f, 1.0f, 1.0f, 1.0f};
 
 // Synchronization primitives
 pthread_mutex_t main_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -45,34 +44,35 @@ bool quit = false;
 
 // Mutexes for shared tracks
 pthread_mutex_t shared_track_mutex[NUM_SHARED_TRACKS];
+
+// Semaphore for intersection
 sem_t intersection_semaphore;
+#define MAX_TRAINS_IN_INTERSECTION 3
 
 // Function to check if a position is in a shared track
 int is_shared_track(int track_id, int pos) {
-    // Only the positions at the inner cross are shared
-
-    if (track_id == 0){
+    if (track_id == 0) {
         if (pos > track_width && pos < track_width + track_height) 
             return 0;
         else if (pos > track_width + track_height && pos < 2*track_width + track_height)
             return 3;
     }
     
-    if (track_id == 1){
+    if (track_id == 1) {
         if (pos > track_width + track_height && pos < 2*track_width + track_height) 
             return 1;
         else if (pos > 2*track_width + track_height)
             return 0;
     }
     
-    if (track_id == 2){
+    if (track_id == 2) {
         if (pos < track_width) 
             return 3;
         else if (pos > track_width && pos < track_width + track_height)
             return 2;
     }
  
-    if (track_id == 3){
+    if (track_id == 3) {
         if (pos < track_width) 
             return 1;
         else if (pos > 2*track_width + track_height)
@@ -82,6 +82,7 @@ int is_shared_track(int track_id, int pos) {
     return -1;  // Not in a shared track
 }
 
+// Function to check if a position is in the intersection
 int is_in_intersection(int track_id, int pos) {
     if (track_id == 0 && pos > track_width && pos < 2*track_width + track_height) return 1;
     if (track_id == 1 && pos > track_width + track_height) return 1;
@@ -97,18 +98,19 @@ void draw_rectangular_track(WINDOW *win, int y, int x, int width, int height) {
     mvwvline(win, y, x + width, TRACK_CHAR, height + 1);
 }
 
-void draw_train(WINDOW *win, int y, int x, int width, int height, int pos) {
+void draw_train(WINDOW *win, int y, int x, int width, int height, float pos) {
     int train_y = y, train_x = x;
-    if (pos < width) {
-        train_x += pos;
-    } else if (pos < width + height) {
+    int int_pos = (int)pos;
+    if (int_pos < width) {
+        train_x += int_pos;
+    } else if (int_pos < width + height) {
         train_x += width;
-        train_y += pos - width;
-    } else if (pos < 2 * width + height) {
-        train_x += 2 * width + height - pos - 1;
+        train_y += int_pos - width;
+    } else if (int_pos < 2 * width + height) {
+        train_x += 2 * width + height - int_pos - 1;
         train_y += height;
     } else {
-        train_y += 2 * width + 2 * height - pos - 1;
+        train_y += 2 * width + 2 * height - int_pos - 1;
     }
     mvwaddch(win, train_y, train_x, TRAIN_CHAR);
 }
@@ -116,7 +118,7 @@ void draw_train(WINDOW *win, int y, int x, int width, int height, int pos) {
 void draw_control_panel(WINDOW *win) {
     mvwprintw(win, 15, 2, "Control Panel:");
     for (int i = 0; i < NUM_TRAINS; i++) {
-        mvwprintw(win, 16 + i, 2, "Train %d: Track %d, Pos %d, Vel %d", 
+        mvwprintw(win, 16 + i, 2, "Train %d: Track %d, Pos %.1f, Vel %.2f", 
                   i + 1, train_pos[i].track_id + 1, train_pos[i].position, train_vel[i]);
     }
     mvwprintw(win, 21, 2, "Use 1-4 to select train, +/- to change speed");
@@ -164,9 +166,10 @@ void* train_thread(void* arg) {
         pthread_mutex_lock(&main_mutex);
         
         if (!paused) {
-            int next_pos = (train_pos[train_id].position + train_vel[train_id] + track_len) % track_len;
-            next_shared_track = is_shared_track(train_pos[train_id].track_id, next_pos);
-            bool next_in_intersection = is_in_intersection(train_pos[train_id].track_id, next_pos);
+            float next_pos = fmodf(train_pos[train_id].position + train_vel[train_id] + track_len, track_len);
+            int int_next_pos = (int)next_pos;
+            next_shared_track = is_shared_track(train_pos[train_id].track_id, int_next_pos);
+            bool next_in_intersection = is_in_intersection(train_pos[train_id].track_id, int_next_pos);
             
             if (next_in_intersection && !in_intersection) {
                 // Trying to enter the intersection
@@ -190,7 +193,7 @@ void* train_thread(void* arg) {
                         in_intersection = false;
                         if (!is_slowed) {
                             original_train_vel[train_id] = train_vel[train_id];
-                            train_vel[train_id] = (train_vel[train_id] > 0) ? 1 : -1;
+                            train_vel[train_id] *= 0.5f;
                             is_slowed = true;
                         }
                     }
@@ -198,7 +201,7 @@ void* train_thread(void* arg) {
                     // Failed to acquire semaphore, slow down the train
                     if (!is_slowed) {
                         original_train_vel[train_id] = train_vel[train_id];
-                        train_vel[train_id] = (train_vel[train_id] > 0) ? 1 : -1;
+                        train_vel[train_id] *= 0.5f;
                         is_slowed = true;
                     }
                 }
@@ -218,7 +221,7 @@ void* train_thread(void* arg) {
                     // Failed to acquire mutex, slow down
                     if (!is_slowed) {
                         original_train_vel[train_id] = train_vel[train_id];
-                        train_vel[train_id] = (train_vel[train_id] > 0) ? 1 : -1;
+                        train_vel[train_id] *= 0.5f;
                         is_slowed = true;
                     }
                 }
@@ -227,7 +230,7 @@ void* train_thread(void* arg) {
                 train_pos[train_id].position = next_pos;
                 
                 // If exiting a shared track
-                if (current_shared_track != -1 && is_shared_track(train_pos[train_id].track_id, train_pos[train_id].position) == -1) {
+                if (current_shared_track != -1 && is_shared_track(train_pos[train_id].track_id, (int)train_pos[train_id].position) == -1) {
                     pthread_mutex_unlock(&shared_track_mutex[current_shared_track]);
                     current_shared_track = -1;
                 }
@@ -238,10 +241,13 @@ void* train_thread(void* arg) {
                     in_intersection = false;
                 }
                 
-                // Restore original velocity if it was changed
+                // Gradually increase speed back to original if slowed
                 if (is_slowed) {
-                    train_vel[train_id] = original_train_vel[train_id];
-                    is_slowed = false;
+                    train_vel[train_id] += (original_train_vel[train_id] - train_vel[train_id]) * 0.1f;
+                    if (fabsf(train_vel[train_id] - original_train_vel[train_id]) < 0.01f) {
+                        train_vel[train_id] = original_train_vel[train_id];
+                        is_slowed = false;
+                    }
                 }
             }
         }
@@ -260,7 +266,6 @@ void* train_thread(void* arg) {
     return NULL;
 }
 
-
 int main() {
     initscr();
     cbreak();
@@ -274,6 +279,7 @@ int main() {
         pthread_mutex_init(&shared_track_mutex[i], NULL);
     }
 
+    // Initialize the intersection semaphore
     sem_init(&intersection_semaphore, 0, MAX_TRAINS_IN_INTERSECTION);
 
     pthread_t render_tid, train_tid[NUM_TRAINS];
@@ -295,14 +301,14 @@ int main() {
                 active_train = ch - '1';
                 break;
             case '+':
-                if (train_vel[active_train] < 5) {
-                    train_vel[active_train]++;
+                if (train_vel[active_train] < 5.0f) {
+                    train_vel[active_train] += 0.1f;
                     original_train_vel[active_train] = train_vel[active_train];
                 }
                 break;
             case '-':
-                if (train_vel[active_train] > -5) {
-                    train_vel[active_train]--;
+                if (train_vel[active_train] > -5.0f) {
+                    train_vel[active_train] -= 0.1f;
                     original_train_vel[active_train] = train_vel[active_train];
                 }
                 break;
@@ -335,9 +341,9 @@ int main() {
             // Display pause information
             mvprintw(0, 0, "GAME PAUSED");
             for (int i = 0; i < NUM_TRAINS; i++) {
-                int next_pos = (train_pos[i].position + train_vel[i] + track_len) % track_len;
-                int next_shared = is_shared_track(train_pos[i].track_id, next_pos);
-                mvprintw(17+i, 0, "Train %d: Track %d, Pos %d, Vel %d, Next Shared: %d",
+                float next_pos = fmodf(train_pos[i].position + train_vel[i] + track_len, track_len);
+                int next_shared = is_shared_track(train_pos[i].track_id, (int)next_pos);
+                mvprintw(17+i, 0, "Train %d: Track %d, Pos %.1f, Vel %.2f, Next Shared: %d",
                          i+1, train_pos[i].track_id+1, train_pos[i].position, train_vel[i],
                          next_shared);
             }
@@ -358,6 +364,7 @@ cleanup:
         pthread_mutex_destroy(&shared_track_mutex[i]);
     }
 
+    // Destroy the intersection semaphore
     sem_destroy(&intersection_semaphore);
 
     endwin();
